@@ -1,0 +1,150 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "congreso-open-data"
+version = "1.0.0"
+description = "Streaming acquisition, evidence and normalization for official Spanish Congress data"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Civic Polity Labs" }]
+keywords = ["congreso", "open-data", "parliament", "spain", "etl"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = [
+  "lxml>=5.0,<7",
+  "pydantic>=2.7,<3",
+  "python-dateutil>=2.9,<3",
+  "requests>=2.31,<3",
+  "typer>=0.12,<1",
+]
+
+[project.urls]
+Homepage = "https://github.com/Civic-Polity-Labs/congreso-open-data"
+Documentation = "https://github.com/Civic-Polity-Labs/congreso-open-data#readme"
+Issues = "https://github.com/Civic-Polity-Labs/congreso-open-data/issues"
+Source = "https://github.com/Civic-Polity-Labs/congreso-open-data"
+
+[project.scripts]
+congreso-open-data = "congreso_open_data.cli:app"
+
+[project.optional-dependencies]
+pdf = ["pypdf>=5,<7", "PyMuPDF>=1.25,<2"]
+ocr = ["numpy>=1.26,<3", "opencv-python-headless>=4.10,<5", "Pillow>=10,<13", "rapidocr-onnxruntime>=1.4,<2"]
+paddle = [
+  "paddleocr>=3,<4; python_version < '3.14'",
+  "paddlepaddle>=3,<4; python_version < '3.14'",
+]
+transformers = [
+  "Pillow>=10,<13",
+  "torch>=2.4,<3; python_version < '3.15'",
+  "transformers>=4.48,<6",
+]
+nlp = ["spacy>=3.8,<4"]
+openai = ["openai>=1.68,<3"]
+anthropic = ["anthropic>=0.49,<2"]
+local = ["openai>=1.68,<3"]
+parquet = ["pyarrow>=18,<24"]
+gpu = [
+  "paddlepaddle-gpu>=2.6,<3; python_version < '3.13' and platform_system == 'Linux'",
+]
+all = [
+  "anthropic>=0.49,<2",
+  "numpy>=1.26,<3",
+  "opencv-python-headless>=4.10,<5",
+  "openai>=1.68,<3",
+  "paddleocr>=3,<4; python_version < '3.14'",
+  "paddlepaddle>=3,<4; python_version < '3.14'",
+  "Pillow>=10,<13",
+  "pyarrow>=18,<24",
+  "pypdf>=5,<7",
+  "PyMuPDF>=1.25,<2",
+  "rapidocr-onnxruntime>=1.4,<2",
+  "spacy>=3.8,<4",
+  "torch>=2.4,<3; python_version < '3.15'",
+  "transformers>=4.48,<6",
+]
+dev = [
+  "build>=1.2,<2",
+  "mypy>=1.15,<2",
+  "pip-audit>=2.8,<3",
+  "pytest>=8.3,<10",
+  "pytest-cov>=6,<8",
+  "ruff>=0.11,<1",
+  "twine>=6,<7",
+  "types-python-dateutil>=2.9",
+  "types-requests>=2.32",
+]
+
+[project.entry-points."congreso_open_data.extractors"]
+native-json = "congreso_open_data.extractors.native:JsonExtractor"
+native-csv = "congreso_open_data.extractors.native:CsvExtractor"
+native-xml = "congreso_open_data.extractors.native:XmlExtractor"
+native-html = "congreso_open_data.extractors.native:HtmlExtractor"
+regex = "congreso_open_data.extractors.rules:RegexExtractor"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/congreso_open_data"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md", "MIGRATION.md", "LICENSE"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/congreso_open_data/batch_extract.py" = ["RUF100"]
+"src/congreso_open_data/documents.py" = ["RUF046"]
+"src/congreso_open_data/interventions.py" = ["RUF001", "RUF034"]
+"src/congreso_open_data/paddle_patrimony.py" = ["B905"]
+"src/congreso_open_data/vote_summary_pdf_nominal.py" = ["RUF001"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = [
+  "congreso_open_data.client",
+  "congreso_open_data.exporters",
+  "congreso_open_data.extractors.llm",
+  "congreso_open_data.extractors.native",
+  "congreso_open_data.extractors.rules",
+  "congreso_open_data.models",
+  "congreso_open_data.registry",
+]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = [
+  "src/congreso_open_data/models.py",
+  "src/congreso_open_data/protocols.py",
+  "src/congreso_open_data/registry.py",
+  "src/congreso_open_data/exporters.py",
+  "src/congreso_open_data/extractors/llm.py",
+  "src/congreso_open_data/extractors/native.py",
+  "src/congreso_open_data/extractors/rules.py",
+]
+follow_imports = "silent"
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]

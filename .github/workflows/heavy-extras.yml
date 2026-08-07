@@ -1,0 +1,26 @@
+name: Heavy extras
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  extras:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        extra: [ocr, nlp, transformers, paddle]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install ".[${{ matrix.extra }},dev]"
+      - run: python -c "import congreso_open_data; print(congreso_open_data.__version__)"
+      - run: pytest -q tests/test_models.py tests/test_extractors.py
