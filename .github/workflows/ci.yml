@@ -24,7 +24,7 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
       - run: ruff check .
-      - run: mypy src/congreso_open_data
+      - run: mypy
       - run: pytest --cov --cov-report=term-missing --cov-fail-under=80
 
   package:
@@ -35,7 +35,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: python -m pip install --upgrade pip build twine pip-audit
+      - run: python -m pip install --upgrade pip "setuptools>=83" build twine pip-audit
       - run: python -m build
       - run: twine check dist/*
       - run: python -m pip_audit

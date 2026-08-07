@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 from congreso_open_data.catalog import DatasetResource, discover_catalog
@@ -24,7 +25,7 @@ class CongressSourceAdapter:
         self.output_root = output_root
         self.transport = transport or CongresoHttpClient()
 
-    def catalog(self):
+    def catalog(self) -> Iterator[CatalogResource]:
         for resource in discover_catalog(client=self.transport):
             yield CatalogResource.model_validate(resource.__dict__)
 

@@ -140,9 +140,12 @@ files = [
   "src/congreso_open_data/models.py",
   "src/congreso_open_data/protocols.py",
   "src/congreso_open_data/registry.py",
+  "src/congreso_open_data/adapters.py",
+  "src/congreso_open_data/client.py",
   "src/congreso_open_data/exporters.py",
   "src/congreso_open_data/extractors/llm.py",
   "src/congreso_open_data/extractors/native.py",
+  "src/congreso_open_data/extractors/ocr.py",
   "src/congreso_open_data/extractors/rules.py",
 ]
 follow_imports = "silent"
