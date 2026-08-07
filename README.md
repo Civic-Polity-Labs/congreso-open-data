@@ -55,3 +55,5 @@ normalization. It does not publish lakehouse tables or serving data. Probabilist
 NLP/LLM output is always represented as reviewable candidates with provenance.
 
 Licensed under MIT.
+
+Release setup: see [PUBLISHING.md](PUBLISHING.md).
