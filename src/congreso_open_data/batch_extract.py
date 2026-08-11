@@ -59,6 +59,7 @@ def extract_resource_batch(
     output_root: Path,
     manifest_index_path: Path,
     max_workers: int = DEFAULT_MAX_WORKERS,
+    submission_batch_size: int = 32,
     resume: bool = True,
     continue_on_error: bool = True,
     progress: ProgressCallback | None = None,
@@ -77,6 +78,8 @@ def extract_resource_batch(
 
     if max_workers <= 0:
         raise ValueError("max_workers must be positive")
+    if submission_batch_size <= 0:
+        raise ValueError("submission_batch_size must be positive")
     if checkpoint_interval <= 0:
         raise ValueError("checkpoint_interval must be positive")
     if not run_date:
@@ -136,54 +139,70 @@ def extract_resource_batch(
 
     first_error: Exception | None = None
     results_since_checkpoint = 0
-    with ThreadPoolExecutor(max_workers=min(max_workers, max(1, len(pending)))) as pool:
-        futures: dict[Future[BronzeManifest], DatasetResource] = {
-            pool.submit(extractor, resource): resource for resource in pending
-        }
-        for future in as_completed(futures):
-            resource = futures[future]
-            key = _resource_key(resource, run_date=run_date)
-            stop_after_event = False
-            try:
-                manifest = future.result()
-                if manifest_validator is not None and not manifest_validator(manifest):
-                    raise ValueError(
-                        "Extracted resource failed its dataset-specific content contract: "
-                        f"{resource.url}"
+    worker_count = min(max_workers, max(1, min(len(pending), submission_batch_size)))
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        for batch_start in range(0, len(pending), submission_batch_size):
+            batch = pending[batch_start : batch_start + submission_batch_size]
+            futures: dict[Future[BronzeManifest], DatasetResource] = {
+                pool.submit(extractor, resource): resource for resource in batch
+            }
+            stop_after_batch = False
+            for future in as_completed(futures):
+                resource = futures[future]
+                key = _resource_key(resource, run_date=run_date)
+                stop_after_event = False
+                try:
+                    manifest = future.result()
+                    if manifest_validator is not None and not manifest_validator(manifest):
+                        raise ValueError(
+                            "Extracted resource failed its dataset-specific content contract: "
+                            f"{resource.url}"
+                        )
+                    manifests_by_key[key] = manifest
+                    downloaded += 1
+                    event = "downloaded"
+                except Exception as exc:  # noqa: BLE001 - persist arbitrary transport failures
+                    failures.append(_failure(resource, run_date=run_date, exc=exc))
+                    first_error = first_error or exc
+                    event = "failed"
+                    if not continue_on_error:
+                        for pending_future in futures:
+                            if not pending_future.done():
+                                pending_future.cancel()
+                        stop_after_event = True
+                        stop_after_batch = True
+                results_since_checkpoint += 1
+                if (
+                    event == "failed"
+                    or results_since_checkpoint >= checkpoint_interval
+                    or reused + downloaded == len(plan)
+                ):
+                    with checkpoint_lock:
+                        _write_checkpoint(
+                            plan=plan,
+                            run_date=run_date,
+                            manifest_index_path=manifest_index_path,
+                            state_path=state_path,
+                            manifests_by_key=manifests_by_key,
+                            failures=failures,
+                            reused=reused,
+                            downloaded=downloaded,
+                        )
+                    results_since_checkpoint = 0
+                if progress:
+                    progress(
+                        _progress_event(
+                            event,
+                            len(plan),
+                            reused,
+                            downloaded,
+                            failures,
+                            resource,
+                        )
                     )
-                manifests_by_key[key] = manifest
-                downloaded += 1
-                event = "downloaded"
-            except Exception as exc:  # noqa: BLE001 - persist arbitrary network/parser failures
-                failures.append(_failure(resource, run_date=run_date, exc=exc))
-                first_error = first_error or exc
-                event = "failed"
-                if not continue_on_error:
-                    for pending_future in futures:
-                        if not pending_future.done():
-                            pending_future.cancel()
-                    stop_after_event = True
-            results_since_checkpoint += 1
-            if (
-                event == "failed"
-                or results_since_checkpoint >= checkpoint_interval
-                or reused + downloaded == len(plan)
-            ):
-                with checkpoint_lock:
-                    _write_checkpoint(
-                        plan=plan,
-                        run_date=run_date,
-                        manifest_index_path=manifest_index_path,
-                        state_path=state_path,
-                        manifests_by_key=manifests_by_key,
-                        failures=failures,
-                        reused=reused,
-                        downloaded=downloaded,
-                    )
-                results_since_checkpoint = 0
-            if progress:
-                progress(_progress_event(event, len(plan), reused, downloaded, failures, resource))
-            if stop_after_event:
+                if stop_after_event:
+                    break
+            if stop_after_batch:
                 break
 
     if first_error is not None and not continue_on_error:

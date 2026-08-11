@@ -7,6 +7,7 @@ from pathlib import Path
 
 from congreso_open_data.catalog import DatasetResource, discover_catalog
 from congreso_open_data.extractors.opendata import extract_resource
+from congreso_open_data.extractors.transparency import TRANSPARENCY_RESOURCES
 from congreso_open_data.http import CongresoHttpClient
 from congreso_open_data.models import ArtifactManifest, CatalogResource
 from congreso_open_data.normalizers import public_manifest
@@ -26,7 +27,12 @@ class CongressSourceAdapter:
         self.transport = transport or CongresoHttpClient()
 
     def catalog(self) -> Iterator[CatalogResource]:
-        for resource in discover_catalog(client=self.transport):
+        seen: set[tuple[str, str, str]] = set()
+        for resource in (*discover_catalog(client=self.transport), *TRANSPARENCY_RESOURCES):
+            identity = (resource.family, resource.url, resource.format)
+            if identity in seen:
+                continue
+            seen.add(identity)
             yield CatalogResource.model_validate(resource.__dict__)
 
     def acquire(self, resource: CatalogResource, *, run_date: str) -> ArtifactManifest:

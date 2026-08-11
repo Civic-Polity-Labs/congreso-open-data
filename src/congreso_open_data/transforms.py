@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Iterable
 from datetime import date
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -27,7 +28,16 @@ from congreso_open_data.normalization import normalize_record_keys, parse_spanis
 def split_links(value: str | None) -> list[str]:
     if not value:
         return []
-    return [part.strip() for part in re.split(r"\s+", value) if part.strip().startswith("http")]
+    output: list[str] = []
+    for part in re.split(r"\s+", value):
+        raw = part.strip()
+        if not raw.startswith("http"):
+            continue
+        fragment = urlparse(raw).fragment
+        canonical = canonical_official_resource_url(raw)
+        if canonical:
+            output.append(f"{canonical}#{fragment}" if fragment else canonical)
+    return output
 
 
 def split_file_numbers(value: str | None) -> list[str]:
@@ -35,7 +45,12 @@ def split_file_numbers(value: str | None) -> list[str]:
 
 
 def parse_euro_amount(value: str) -> float | None:
-    match = re.search(r"(\d{1,3}(?:\.\d{3})*,\d{2})\s*€", value)
+    # Accept the correctly decoded symbol and the legacy mojibake still present
+    # in some historical snapshots. New normalized output remains Unicode.
+    match = re.search(
+        r"(\d{1,3}(?:\.\d{3})*,\d{2})\s*(?:\u20ac|\u00e2.{0,3}\u00ac)",
+        value,
+    )
     if not match:
         return None
     return float(match.group(1).replace(".", "").replace(",", "."))
@@ -675,7 +690,7 @@ def salary_rows_from_text(
 
 
 def document_asset_rows_from_records(
-    rows: list[dict[str, Any]],
+    rows: Iterable[dict[str, Any]],
     *,
     family: str,
     dataset: str,
@@ -686,6 +701,7 @@ def document_asset_rows_from_records(
         normalized = normalize_record_keys(row)
         entity_id = (
             normalized.get("numexpediente")
+            or normalized.get("numeroexpediente")
             or normalized.get("nombre")
             or normalized.get("objetoiniciativa")
         )
@@ -693,13 +709,14 @@ def document_asset_rows_from_records(
             if "enlace" not in key and key not in {"pdf"}:
                 continue
             for url in split_links(value):
-                document_id = stable_id(family, dataset, entity_id, key, url)
+                document_kind = re.sub(r"[^a-z0-9]+", "", key.casefold())
+                document_id = stable_id(family, dataset, entity_id, url)
                 assets[document_id] = {
                     "document_id": document_id,
                     "family": family,
                     "dataset": dataset,
                     "entity_id": entity_id,
-                    "document_kind": key,
+                    "document_kind": document_kind,
                     "title": normalized.get("objeto") or normalized.get("titulo_ley") or entity_id,
                     "url": url,
                     "mime_type": _mime_type_from_url(url),

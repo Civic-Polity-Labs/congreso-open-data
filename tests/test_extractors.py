@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from importlib import metadata
 
 import pytest
 
@@ -238,3 +239,51 @@ def test_unknown_and_duplicate_custom_backends_fail_explicitly() -> None:
         registry.register_factory("custom", lambda spec: WorkingBackend())
     with pytest.raises(LookupError, match="Unknown extractor"):
         registry.create(ExtractionSpec(engine="native", backend="absent", model="none"))
+
+
+def test_published_native_entry_points_are_callable_spec_factories() -> None:
+    entry_points = {
+        item.name: item for item in metadata.entry_points(group="congreso_open_data.extractors")
+    }
+    cases = {
+        "native-json": (
+            ExtractionSpec(engine="native", backend="native-json", model="json-test"),
+            b'{"name":"Ana"}',
+        ),
+        "native-csv": (
+            ExtractionSpec(engine="native", backend="native-csv", model="csv-test"),
+            b"name\nAna\n",
+        ),
+        "native-xml": (
+            ExtractionSpec(engine="native", backend="native-xml", model="xml-test"),
+            b"<root><name>Ana</name></root>",
+        ),
+        "native-html": (
+            ExtractionSpec(engine="native", backend="native-html", model="html-test"),
+            b"<html><body>Ana</body></html>",
+        ),
+    }
+
+    assert cases.keys() <= entry_points.keys()
+    for name, (spec, content) in cases.items():
+        factory = entry_points[name].load()
+        backend = factory(spec)
+        result = backend.extract(content, context())
+        assert backend.model == spec.model
+        assert result.texts
+
+
+def test_custom_extractor_instances_and_factories_cannot_change_requested_model() -> None:
+    instance_registry = ExtractorRegistry()
+    instance_registry.register_instance("custom", WorkingBackend(model="fixed"))
+    with pytest.raises(ValueError, match="requested"):
+        instance_registry.create(
+            ExtractionSpec(engine="native", backend="custom", model="requested")
+        )
+
+    factory_registry = ExtractorRegistry()
+    factory_registry.register_factory("custom", lambda spec: WorkingBackend(model="fixed"))
+    with pytest.raises(ValueError, match="requested"):
+        factory_registry.create(
+            ExtractionSpec(engine="native", backend="custom", model="requested")
+        )

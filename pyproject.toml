@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "congreso-open-data"
-version = "1.0.0"
+version = "1.1.0"
 description = "Streaming acquisition, evidence and normalization for official Spanish Congress data"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,8 +21,12 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 dependencies = [
+  "click>=8.1,<9",
+  "ijson>=3.3,<4",
   "lxml>=5.0,<7",
+  "platformdirs>=4.3,<5",
   "pydantic>=2.7,<3",
+  "pypdf>=5,<7",
   "python-dateutil>=2.9,<3",
   "requests>=2.31,<3",
   "typer>=0.12,<1",
@@ -38,8 +42,15 @@ Source = "https://github.com/Civic-Polity-Labs/congreso-open-data"
 congreso-open-data = "congreso_open_data.cli:app"
 
 [project.optional-dependencies]
-pdf = ["pypdf>=5,<7", "PyMuPDF>=1.25,<2"]
-ocr = ["numpy>=1.26,<3", "opencv-python-headless>=4.10,<5", "Pillow>=10,<13", "rapidocr-onnxruntime>=1.4,<2"]
+pdf = ["PyMuPDF>=1.25,<2"]
+ocr = [
+  "numpy>=1.26,<3",
+  "onnxruntime>=1.20,<2",
+  "opencv-python>=4.10,<5",
+  "Pillow>=10,<13",
+  "PyMuPDF>=1.25,<2",
+  "rapidocr>=3.9,<4",
+]
 paddle = [
   "paddleocr>=3,<4; python_version < '3.14'",
   "paddlepaddle>=3,<4; python_version < '3.14'",
@@ -60,15 +71,14 @@ gpu = [
 all = [
   "anthropic>=0.49,<2",
   "numpy>=1.26,<3",
-  "opencv-python-headless>=4.10,<5",
+  "opencv-python>=4.10,<5",
   "openai>=1.68,<3",
-  "paddleocr>=3,<4; python_version < '3.14'",
-  "paddlepaddle>=3,<4; python_version < '3.14'",
   "Pillow>=10,<13",
   "pyarrow>=18,<24",
   "pypdf>=5,<7",
   "PyMuPDF>=1.25,<2",
-  "rapidocr-onnxruntime>=1.4,<2",
+  "rapidocr>=3.9,<4",
+  "onnxruntime>=1.20,<2",
   "spacy>=3.8,<4",
   "torch>=2.4,<3; python_version < '3.15'",
   "transformers>=4.48,<6",
@@ -86,17 +96,17 @@ dev = [
 ]
 
 [project.entry-points."congreso_open_data.extractors"]
-native-json = "congreso_open_data.extractors.native:JsonExtractor"
-native-csv = "congreso_open_data.extractors.native:CsvExtractor"
-native-xml = "congreso_open_data.extractors.native:XmlExtractor"
-native-html = "congreso_open_data.extractors.native:HtmlExtractor"
-regex = "congreso_open_data.extractors.rules:RegexExtractor"
+native-json = "congreso_open_data.extractors.native:JsonExtractor.from_spec"
+native-csv = "congreso_open_data.extractors.native:CsvExtractor.from_spec"
+native-xml = "congreso_open_data.extractors.native:XmlExtractor.from_spec"
+native-html = "congreso_open_data.extractors.native:HtmlExtractor.from_spec"
+regex = "congreso_open_data.extractors.rules:RegexExtractor.from_spec"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/congreso_open_data"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "tests", "README.md", "MIGRATION.md", "LICENSE"]
+include = ["src", "tests", "docs", "examples", "README.md", "MIGRATION.md", "LICENSE"]
 
 [tool.ruff]
 target-version = "py311"
@@ -112,6 +122,8 @@ ignore = ["E501"]
 "src/congreso_open_data/interventions.py" = ["RUF001", "RUF034"]
 "src/congreso_open_data/paddle_patrimony.py" = ["B905"]
 "src/congreso_open_data/vote_summary_pdf_nominal.py" = ["RUF001"]
+"tests/test_migrated_documents.py" = ["RUF001"]
+"tests/test_migrated_interventions.py" = ["RUF001"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"
@@ -119,34 +131,34 @@ testpaths = ["tests"]
 
 [tool.coverage.run]
 branch = true
-source = [
-  "congreso_open_data.client",
-  "congreso_open_data.exporters",
-  "congreso_open_data.extractors.llm",
-  "congreso_open_data.extractors.native",
-  "congreso_open_data.extractors.rules",
-  "congreso_open_data.models",
-  "congreso_open_data.registry",
-]
+source = ["congreso_open_data"]
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 69
 show_missing = true
 
 [tool.mypy]
 python_version = "3.11"
 strict = true
 files = [
+  "src/congreso_open_data/api/congress.py",
+  "src/congreso_open_data/api/queries.py",
+  "src/congreso_open_data/api/records.py",
+  "src/congreso_open_data/api/results.py",
   "src/congreso_open_data/models.py",
   "src/congreso_open_data/protocols.py",
+  "src/congreso_open_data/plugins/models.py",
+  "src/congreso_open_data/plugins/registry.py",
   "src/congreso_open_data/registry.py",
   "src/congreso_open_data/adapters.py",
   "src/congreso_open_data/client.py",
+  "src/congreso_open_data/cli.py",
   "src/congreso_open_data/exporters.py",
   "src/congreso_open_data/extractors/llm.py",
   "src/congreso_open_data/extractors/native.py",
   "src/congreso_open_data/extractors/ocr.py",
   "src/congreso_open_data/extractors/rules.py",
+  "src/congreso_open_data/rapidocr_compat.py",
 ]
 follow_imports = "silent"
 ignore_missing_imports = true

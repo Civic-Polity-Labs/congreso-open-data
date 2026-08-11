@@ -1,59 +1,120 @@
 # congreso-open-data
 
-Installable, streaming-first Python API for acquiring, preserving and normalizing
-official data from the Congreso de los Diputados. It covers the discoverable open-data
-catalog and linked official resources: deputies, profiles, interests and financial
-documents, initiatives, interventions, organs, votes, journals, documents and
-transparency assets, including historical sources.
+API Python tipada para adquirir, preservar y normalizar datos oficiales del Congreso
+de los Diputados: diputados, perfiles, intereses y bienes, iniciativas,
+intervenciones, órganos, votaciones, diarios y documentos históricos.
+
+## Uso end to end
 
 ```bash
 pip install congreso-open-data
-congreso-open-data catalog --format jsonl
 ```
+
+```python
+from congreso_open_data import Congress
+
+with Congress() as congress:
+    result = congress.interventions.search(
+        speaker="Pedro Sánchez",
+        last_months=3,
+    )
+    for intervention in result:
+        print(intervention.session_date, intervention.title)
+        print(intervention.text)
+
+    print(result.run.complete, result.run.raw_records)
+```
+
+El usuario no construye URLs, POST, páginas, manifiestos ni parsers. `Congress`
+resuelve el nombre contra el índice oficial, aplica filtros y paginación, guarda
+Bronze con hash y procedencia, normaliza, reconcilia el total oficial y obtiene texto
+nativo. OCR solo se usa si se solicita con `text_policy="ocr"`.
+
+El directorio por defecto es el directorio persistente de datos de usuario de la
+plataforma. En jobs y tests conviene declararlo con `Congress(data_dir=...)`.
+
+```bash
+congreso-open-data interventions --speaker "Pedro Sánchez" --last-months 3
+```
+
+## El modelo lo elige el usuario
+
+No hay un proveedor obligatorio. Se puede registrar un callable, implementar el
+protocolo `ModelBackend` o instalar un plugin con el entry point
+`congreso_open_data.models`. La identidad del modelo es obligatoria para conservar
+procedencia reproducible.
+
+```python
+from congreso_open_data import Congress, ExtractionSpec, ExtractionTask
+
+
+def my_model(request):
+    # Aquí puede llamarse a cualquier SDK, servidor local o modelo propio.
+    return {
+        "candidates": [
+            {
+                "kind": "topic",
+                "value": "vivienda",
+                "quote": "acceso a la vivienda",
+                "confidence": 0.91,
+            }
+        ]
+    }
+
+
+with Congress() as congress:
+    congress.models.register_callable(
+        "mine",
+        model="my-model-id",
+        version="2026-08-09",
+        function=my_model,
+        provider="self-hosted",
+    )
+    task = ExtractionTask(
+        name="topics",
+        instructions="Extrae temas apoyados por citas literales.",
+        backend=ExtractionSpec(engine="llm", backend="mine", model="my-model-id"),
+    )
+    rows = congress.interventions.search(
+        speaker="Pedro Sánchez",
+        last_months=3,
+        extractions=(task,),
+    )
+```
+
+La salida del modelo nunca se promueve a hecho: son `ExtractionCandidate` con
+`status="review_required"`, fuente, modelo y evidencia literal o marcada como no
+literal. Clientes SDK, callables y credenciales no se serializan en la consulta.
+
+## API de bajo nivel compatible
+
+La API 1.0 continúa disponible durante toda la serie 1.x:
 
 ```python
 from congreso_open_data import CongressClient, ExtractionPlan
 
 client = CongressClient(output_root="bronze")
-for resource in client.catalog():
-    print(resource.family, resource.url)
-
 plan = ExtractionPlan(families=("diputados",), output_root="bronze")
-for manifest in client.extract(plan):
-    print(manifest.sha256, manifest.payload_path)
+manifests = tuple(client.extract(plan))
+for deputy in client.deputies(manifests):
+    print(deputy.full_name, deputy.source.sha256)
 ```
 
-Extractor selection is explicit. Cloud backends never run automatically and no
-fallback exists unless the caller declares one. API keys are read at call time from
-`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`, or passed directly in memory. They are redacted
-from models, logs and manifests.
+Extras: `pdf` (fallback PyMuPDF), `ocr`, `paddle`, `transformers`, `nlp`,
+`openai`, `anthropic`, `local`, `parquet`, `all`, `gpu` y `dev`. La extracción PDF
+nativa con `pypdf` forma parte de la instalación base; OCR y GPU son opcionales.
+`ocr` (RapidOCR) y `paddle` son motores alternativos y deben instalarse en entornos
+separados porque sus distribuciones OpenCV se solapan; por ello `all` incluye el
+backend RapidOCR mantenido, pero excluye Paddle.
 
-```python
-from congreso_open_data import ExtractionSpec
-from congreso_open_data.extractors import create_extractor
+Consulta [ejemplos end to end](docs/EXAMPLES.md),
+[cookbook probado de toda la API](docs/API_COOKBOOK.md),
+[arquitectura](docs/ARCHITECTURE.md), [pruebas](docs/TESTING.md),
+[orquestación](docs/ORCHESTRATION_ROADMAP.md) y [migración](MIGRATION.md).
 
-spec = ExtractionSpec(engine="llm", backend="openai", model="your-model-id")
-backend = create_extractor(spec)
-result = backend.extract(content, context)
-```
+El paquete termina en evidencia original, normalización determinista y candidatos
+revisables. Silver/Gold, decisiones editoriales, publicación y serving pertenecen a
+`cpl-data-foundry`; la planificación recurrente pertenece a
+`civic-factory-platform`.
 
-Extras: `pdf`, `ocr`, `paddle`, `transformers`, `nlp`, `openai`, `anthropic`,
-`local`, `parquet`, `all`, `gpu`, and `dev`. The `all` extra uses CPU-safe runtime
-packages; GPU support is opt-in through `gpu`.
-
-## Español
-
-El paquete solo realiza extracción en bruto, preservación de evidencia, parsing y
-normalización. No publica Silver/Gold, no escribe tablas de serving y nunca convierte
-una inferencia probabilística en un hecho canónico. Los resultados NLP/LLM se devuelven
-como candidatos revisables con evidencia y procedencia.
-
-## English
-
-This package is limited to raw extraction, evidence preservation, parsing and
-normalization. It does not publish lakehouse tables or serving data. Probabilistic
-NLP/LLM output is always represented as reviewable candidates with provenance.
-
-Licensed under MIT.
-
-Release setup: see [PUBLISHING.md](PUBLISHING.md).
+Licensed under MIT. Release setup: [PUBLISHING.md](PUBLISHING.md).

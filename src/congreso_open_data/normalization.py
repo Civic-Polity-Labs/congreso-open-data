@@ -4,9 +4,13 @@ import csv
 import json
 import re
 import unicodedata
+from collections.abc import Iterator
 from datetime import date, datetime
 from io import StringIO
+from pathlib import Path
 from typing import Any
+
+import ijson
 
 DATE_FORMATS = ("%d/%m/%Y", "%d/%m/%y", "%d/%m/%Y %H:%M")
 
@@ -53,6 +57,37 @@ def load_records(content: bytes, format_name: str) -> list[dict[str, Any]]:
     if format_name == "csv":
         text = content.decode("utf-8-sig")
         return list(csv.DictReader(StringIO(text), delimiter=";"))
+    raise ValueError(f"Unsupported tabular format: {format_name}")
+
+
+def iter_records(path: Path, format_name: str) -> Iterator[dict[str, Any]]:
+    """Yield tabular records without materializing an array or CSV file."""
+
+    if format_name == "json":
+        with path.open("rb") as handle:
+            prefix = handle.read(4_096).lstrip(b"\xef\xbb\xbf \t\r\n")
+        if prefix.startswith(b"["):
+            with path.open("rb") as handle:
+                for row in ijson.items(handle, "item"):
+                    if not isinstance(row, dict):
+                        raise ValueError("JSON array records must be objects")
+                    yield dict(row)
+            return
+        # Object-root payloads represent one bounded record or a dataset-specific
+        # envelope handled by the caller. Avoid pretending an arbitrary mapping is
+        # a stream of records.
+        from congreso_open_data.protocols import ensure_bounded_file
+
+        for row in load_records(
+            ensure_bounded_file(path, max_bytes=64 * 1024 * 1024),
+            format_name,
+        ):
+            yield row
+        return
+    if format_name == "csv":
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            yield from csv.DictReader(handle, delimiter=";")
+        return
     raise ValueError(f"Unsupported tabular format: {format_name}")
 
 

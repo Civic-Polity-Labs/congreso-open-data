@@ -102,6 +102,7 @@ class ExtractorBackend(Protocol):
     name: ClassVar[str]
     engine: ClassVar[str]
     version: ClassVar[str]
+
     @property
     def model(self) -> str: ...
 

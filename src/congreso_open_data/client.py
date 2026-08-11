@@ -17,26 +17,41 @@ from congreso_open_data.models import (
     ArtifactManifest,
     CatalogResource,
     Deputy,
+    DeputyProfile,
     DocumentAsset,
+    DocumentText,
     ExtractionFailure,
     ExtractionPlan,
     ExtractionRun,
+    FinancialDocument,
     Initiative,
+    InterestDeclaration,
     Intervention,
+    InterventionOccurrence,
     NominalVote,
     Organ,
     OrganMembership,
+    SalaryEntitlement,
+    SpeechBlock,
     VoteEvent,
     VoteItem,
 )
 from congreso_open_data.normalizers import (
     deputies as normalize_deputies,
 )
+from congreso_open_data.normalizers import document_texts as normalize_document_texts
 from congreso_open_data.normalizers import (
     documents as normalize_documents,
 )
+from congreso_open_data.normalizers import financial_documents as normalize_financial_documents
 from congreso_open_data.normalizers import (
     initiatives as normalize_initiatives,
+)
+from congreso_open_data.normalizers import (
+    interests as normalize_interests,
+)
+from congreso_open_data.normalizers import (
+    intervention_occurrences as normalize_intervention_occurrences,
 )
 from congreso_open_data.normalizers import (
     interventions as normalize_interventions,
@@ -49,9 +64,14 @@ from congreso_open_data.normalizers import (
     organs as normalize_organs,
 )
 from congreso_open_data.normalizers import (
+    profiles as normalize_profiles,
+)
+from congreso_open_data.normalizers import salary_entitlements as normalize_salary_entitlements
+from congreso_open_data.normalizers import speech_blocks as normalize_speech_blocks
+from congreso_open_data.normalizers import (
     votes as normalize_votes,
 )
-from congreso_open_data.protocols import ExtractionContext, SourceAdapter
+from congreso_open_data.protocols import ExtractionContext, SourceAdapter, ensure_bounded_file
 
 
 class CongressClient:
@@ -73,7 +93,13 @@ class CongressClient:
         yield from self.adapter.catalog()
 
     def extract(self, plan: ExtractionPlan) -> Iterator[ArtifactManifest]:
+        self._validate_plan_root(plan)
         resources = tuple(plan.resources) or tuple(self._selected_catalog(plan))
+        if len(resources) > plan.max_resources:
+            raise ValueError(
+                f"Extraction plan contains {len(resources)} resources; "
+                f"configured maximum is {plan.max_resources}"
+            )
         legacy_resources = [DatasetResource(**item.model_dump()) for item in resources]
         run_id = uuid.uuid4().hex
         started_at = datetime.now(UTC)
@@ -95,6 +121,7 @@ class CongressClient:
             output_root=plan.output_root,
             manifest_index_path=manifest_index,
             max_workers=plan.max_workers,
+            submission_batch_size=plan.batch_size,
             resume=plan.resume,
             continue_on_error=plan.continue_on_error,
             request_interval_seconds=plan.request_interval_seconds,
@@ -127,7 +154,7 @@ class CongressClient:
                 path = Path(manifest.payload_path)
                 if not path.is_absolute():
                     path = plan.output_root / path
-                content = path.read_bytes()
+                content = ensure_bounded_file(path, max_bytes=plan.max_artifact_bytes)
                 context = ExtractionContext(
                     source=manifest.source_ref(),
                     mime_type=manifest.content_type,
@@ -173,10 +200,35 @@ class CongressClient:
             self._manifests("iniciativas", manifests), root=self.output_root
         )
 
+    def interests(
+        self, manifests: Iterable[ArtifactManifest] | None = None
+    ) -> Iterator[InterestDeclaration]:
+        yield from normalize_interests(
+            self._manifests("diputados", manifests), root=self.output_root
+        )
+
+    def profiles(
+        self, manifests: Iterable[ArtifactManifest] | None = None
+    ) -> Iterator[DeputyProfile]:
+        source = manifests if manifests is not None else self._manifests("diputados", None)
+        yield from normalize_profiles(source, root=self.output_root)
+
+    def financial_documents(
+        self, manifests: Iterable[ArtifactManifest]
+    ) -> Iterator[FinancialDocument]:
+        yield from normalize_financial_documents(manifests, root=self.output_root)
+
     def interventions(
         self, manifests: Iterable[ArtifactManifest] | None = None
     ) -> Iterator[Intervention]:
         yield from normalize_interventions(
+            self._manifests("intervenciones", manifests), root=self.output_root
+        )
+
+    def intervention_occurrences(
+        self, manifests: Iterable[ArtifactManifest] | None = None
+    ) -> Iterator[InterventionOccurrence]:
+        yield from normalize_intervention_occurrences(
             self._manifests("intervenciones", manifests), root=self.output_root
         )
 
@@ -193,8 +245,39 @@ class CongressClient:
     def documents(
         self, manifests: Iterable[ArtifactManifest] | None = None
     ) -> Iterator[DocumentAsset]:
-        source = manifests if manifests is not None else self._manifests("diputados", None)
+        source = (
+            manifests
+            if manifests is not None
+            else self.extract(ExtractionPlan(output_root=self.output_root))
+        )
         yield from normalize_documents(source, root=self.output_root)
+
+    def document_texts(
+        self,
+        manifests: Iterable[ArtifactManifest],
+        *,
+        use_ocr: bool = False,
+    ) -> Iterator[DocumentText]:
+        yield from normalize_document_texts(
+            manifests,
+            root=self.output_root,
+            use_ocr=use_ocr,
+        )
+
+    def speech_blocks(self, manifests: Iterable[ArtifactManifest]) -> Iterator[SpeechBlock]:
+        yield from normalize_speech_blocks(manifests, root=self.output_root)
+
+    def salary_entitlements(
+        self, manifests: Iterable[ArtifactManifest]
+    ) -> Iterator[SalaryEntitlement]:
+        yield from normalize_salary_entitlements(manifests, root=self.output_root)
+
+    def _validate_plan_root(self, plan: ExtractionPlan) -> None:
+        if plan.output_root.resolve() != self.output_root.resolve():
+            raise ValueError(
+                "ExtractionPlan.output_root must match CongressClient.output_root; "
+                "construct a client for the requested root"
+            )
 
     def _manifests(
         self, family: str, manifests: Iterable[ArtifactManifest] | None

@@ -6,7 +6,7 @@ import csv
 import io
 import json
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from lxml import etree, html
 
@@ -177,12 +177,13 @@ class PyMuPDFExtractor:
 
     def extract(self, content: bytes, context: ExtractionContext) -> ExtractionResult:
         try:
-            import fitz
+            import pymupdf as fitz
         except ImportError as exc:
             raise RuntimeError("Install congreso-open-data[pdf] for the PyMuPDF backend") from exc
         texts: list[str] = []
         evidence: list[ExtractionEvidence] = []
-        with fitz.open(stream=content, filetype="pdf") as document:
+        open_pdf: Any = fitz.open
+        with open_pdf(stream=content, filetype="pdf") as document:
             for page_number, page in enumerate(document, start=1):
                 text = page.get_text("text") or ""
                 texts.append(text)

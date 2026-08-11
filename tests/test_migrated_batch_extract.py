@@ -463,6 +463,41 @@ def test_extract_resource_batch_dataset_validator_retries_http_200_error_json(
     assert calls == 2
 
 
+def test_batch_larger_than_submission_window_publishes_every_physical_object(
+    tmp_path: Path,
+) -> None:
+    resources = [_resource(str(index)) for index in range(5)]
+
+    def extract_one(item: DatasetResource):
+        return persist_bronze(
+            root=tmp_path,
+            resource=item,
+            run_date="2026-08-08",
+            result=FetchResult(
+                url=item.url,
+                status_code=200,
+                headers={"Content-Type": "application/json"},
+                content=json.dumps({"token": item.snapshot_token}).encode(),
+            ),
+        )
+
+    result = extract_resource_batch(
+        resources=resources,
+        run_date="2026-08-08",
+        output_root=tmp_path,
+        manifest_index_path=tmp_path / "manifests.json",
+        max_workers=2,
+        submission_batch_size=2,
+        checkpoint_interval=2,
+        extract_one=extract_one,
+    )
+
+    payloads = {tmp_path / manifest.bronze_path for manifest in result.manifests}
+    assert result.planned == result.completed == result.downloaded == 5
+    assert len(payloads) == 5
+    assert all(path.is_file() for path in payloads)
+
+
 def _resource(token: str) -> DatasetResource:
     base = DatasetResource(
         family="intervenciones",

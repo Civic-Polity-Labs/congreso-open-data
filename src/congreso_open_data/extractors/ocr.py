@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import io
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from congreso_open_data.models import ExtractionEvidence, ExtractionSpec
 from congreso_open_data.protocols import ExtractionContext, ExtractionResult
+from congreso_open_data.rapidocr_compat import create_rapidocr_engine, rapidocr_lines
 
 
 def _image(content: bytes) -> Any:
@@ -41,17 +42,12 @@ class RapidOcrExtractor:
     def extract(self, content: bytes, context: ExtractionContext) -> ExtractionResult:
         engine = self._engine
         if engine is None:
-            try:
-                from rapidocr_onnxruntime import RapidOCR
-            except ImportError as exc:
-                raise RuntimeError("Install congreso-open-data[ocr] for RapidOCR") from exc
-            engine = RapidOCR()
+            engine = create_rapidocr_engine()
         try:
             import numpy as np
         except ImportError as exc:
             raise RuntimeError("Install congreso-open-data[ocr] for RapidOCR") from exc
-        raw, _ = engine(np.asarray(_image(content)))
-        lines = raw or []
+        lines = rapidocr_lines(engine(np.asarray(_image(content))))
         texts: list[str] = []
         evidence: list[ExtractionEvidence] = []
         for item in lines:
@@ -139,7 +135,8 @@ class PaddleOcrExtractor:
 @dataclass(frozen=True)
 class TransformersOcrExtractor:
     model: str
-    task: str = "image-to-text"
+    task: Literal["image-text-to-text"] = "image-text-to-text"
+    prompt: str = "Transcribe all visible text exactly. Do not summarize or infer missing text."
     _pipeline: Any = field(default=None, repr=False, compare=False)
     name: ClassVar[str] = "transformers"
     engine: ClassVar[str] = "ocr"
@@ -147,9 +144,23 @@ class TransformersOcrExtractor:
 
     @classmethod
     def from_spec(cls, spec: ExtractionSpec) -> TransformersOcrExtractor:
+        task = str(spec.options.get("task", "image-text-to-text"))
+        # Transformers 5 removed the legacy image-to-text pipeline. Accept the
+        # old spelling while configurations migrate, but always execute the
+        # supported image-text-to-text contract.
+        if task == "image-to-text":
+            task = "image-text-to-text"
+        if task != "image-text-to-text":
+            raise ValueError("Transformers OCR task must be 'image-text-to-text'")
         return cls(
             model=spec.model,
-            task=str(spec.options.get("task", "image-to-text")),
+            task="image-text-to-text",
+            prompt=str(
+                spec.options.get(
+                    "prompt",
+                    "Transcribe all visible text exactly. Do not summarize or infer missing text.",
+                )
+            ),
             _pipeline=spec.options.get("pipeline"),
         )
 
@@ -163,7 +174,7 @@ class TransformersOcrExtractor:
                     "Install congreso-open-data[transformers] for local Transformers OCR"
                 ) from exc
             pipeline = create_pipeline(self.task, model=self.model)
-        output = pipeline(_image(content))
+        output = pipeline(images=_image(content), text=self.prompt)
         if isinstance(output, dict):
             output = [output]
         texts = tuple(
@@ -179,7 +190,11 @@ class TransformersOcrExtractor:
                 backend=self.name,
                 model=self.model,
                 version=self.version,
-                literal=True,
+                # Generative vision output can hallucinate even when prompted
+                # for transcription. It is evidence to review, not a literal
+                # source span.
+                literal=False,
+                diagnostics={"review_required": True, "task": self.task},
             )
             for text in texts
         )

@@ -16,21 +16,22 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
+      - run: python -m pip install -e ".[dev,pdf,ocr]"
       - run: ruff check .
+      - run: ruff format --check .
       - run: mypy
-      - run: pytest --cov --cov-report=term-missing --cov-fail-under=80
+      - run: pytest --cov=congreso_open_data --cov-branch --cov-report=term-missing --cov-fail-under=69
 
   package:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -38,13 +39,40 @@ jobs:
       - run: python -m pip install --upgrade pip "setuptools>=83" build twine pip-audit
       - run: python -m build
       - run: twine check dist/*
-      - run: python -m pip_audit
+      - run: python -m pip install dist/*.whl
+      # Until the 1.0 wheel exists on PyPI, strict mode would reject the local
+      # project itself as unauditable. Installed third-party dependencies are
+      # still audited; switch to --strict after the first trusted release.
+      - run: python -m pip_audit --local
       - name: Install and smoke wheel in a clean virtual environment
         run: |
           python -m venv /tmp/wheel-smoke
           /tmp/wheel-smoke/bin/pip install dist/*.whl
-          /tmp/wheel-smoke/bin/python -c "import congreso_open_data; print(congreso_open_data.__version__)"
+          /tmp/wheel-smoke/bin/python -m pip check
+          /tmp/wheel-smoke/bin/python - <<'PY'
+          from importlib import metadata, resources
+
+          import congreso_open_data as package
+          from congreso_open_data import ExtractionSpec
+
+          assert package.__version__ == "1.1.0"
+          assert all(hasattr(package, name) for name in package.__all__)
+          assert resources.files(package).joinpath("extraction_contracts.toml").is_file()
+          entry_points = {
+              entry_point.name: entry_point
+              for entry_point in metadata.entry_points(group="congreso_open_data.extractors")
+          }
+          assert {"native-csv", "native-html", "native-json", "native-xml", "regex"} <= entry_points.keys()
+          factory = entry_points["native-json"].load()
+          backend = factory(
+              ExtractionSpec(engine="json", backend="native-json", model="native-json")
+          )
+          assert backend.descriptor.model == "native-json"
+          print(package.__version__, len(package.__all__))
+          PY
           /tmp/wheel-smoke/bin/congreso-open-data --help
+          /tmp/wheel-smoke/bin/congreso-open-data backends
+          /tmp/wheel-smoke/bin/congreso-open-data models
       - uses: actions/upload-artifact@v4
         with:
           name: distributions
@@ -53,10 +81,26 @@ jobs:
   light-extras:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
       - run: python -m pip install ".[pdf,openai,anthropic,parquet,dev]"
       - run: pytest -q tests/test_extractors.py tests/test_exporters.py
+
+  optional-backends:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        extras: ["dev,ocr,nlp", "dev,ocr,transformers", "dev,paddle"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install ".[${{ matrix.extras }}]"
+      - run: pytest -q tests/test_optional_backend_contracts.py
+      - run: mypy

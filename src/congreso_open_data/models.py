@@ -81,7 +81,12 @@ class ArtifactManifest(PublicModel):
     bytes: int = Field(ge=0)
     payload_path: str
     manifest_path: str | None = None
+    request_method: str = "GET"
     request_parameters: str | dict[str, Any] | None = None
+    request_parameters_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-fA-F]{64}$",
+    )
     adapter: str = "congreso.catalog"
     adapter_version: str = "1.0.0"
     normalization_version: str = "1.0.0"
@@ -97,6 +102,11 @@ class ArtifactManifest(PublicModel):
         if isinstance(value, dict):
             return redact_parameters(value)
         return value
+
+    @field_validator("request_method", mode="before")
+    @classmethod
+    def _normalize_request_method(cls, value: Any) -> str:
+        return str(value or "GET").strip().upper()
 
     @classmethod
     def from_legacy(cls, raw: dict[str, Any]) -> ArtifactManifest:
@@ -190,6 +200,13 @@ class ExtractionPlan(PublicModel):
     run_date: str = Field(default_factory=lambda: Date.today().isoformat())
     specs: tuple[ExtractionSpec, ...] = ()
     batch_size: int = Field(default=32, ge=1, le=1000)
+    max_resources: int = Field(default=50_000, ge=1, le=1_000_000)
+    max_artifact_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        ge=1,
+        le=512 * 1024 * 1024,
+        description="Maximum artifact size materialized for an in-memory extraction backend.",
+    )
     max_workers: int = Field(default=4, ge=1, le=16)
     request_interval_seconds: float = Field(default=0.2, ge=0)
     resume: bool = True
@@ -226,9 +243,21 @@ class CongressRecord(PublicModel):
 class Deputy(CongressRecord):
     deputy_id: str
     full_name: str
+    first_name: str | None = None
+    last_names: str | None = None
+    birth_date: Date | None = None
+    gender: str | None = None
+    age_at_snapshot: int | None = None
     legislature: str | None = None
     constituency: str | None = None
+    electoral_party: str | None = None
     parliamentary_group: str | None = None
+    term_start_date: Date | None = None
+    term_end_date: Date | None = None
+    group_start_date: Date | None = None
+    group_end_date: Date | None = None
+    biography: str | None = None
+    profile_url: str | None = None
 
 
 class DeputyProfile(CongressRecord):
@@ -236,6 +265,15 @@ class DeputyProfile(CongressRecord):
     full_name: str
     profile_url: str | None = None
     legislature: str | None = None
+    parliamentary_code: str | None = Field(default=None, alias="cod_parlamentario")
+    birth_date: Date | None = None
+    birth_place: str | None = None
+    constituency: str | None = None
+    parliamentary_group: str | None = None
+    parliamentary_group_code: str | None = None
+    electoral_party: str | None = None
+    email: str | None = None
+    full_condition_date: Date | None = None
 
 
 class InterestDeclaration(CongressRecord):
@@ -243,6 +281,16 @@ class InterestDeclaration(CongressRecord):
     deputy_id: str | None = None
     description: str | None = None
     amount_eur: float | None = None
+    full_name: str | None = None
+    registered_at: Date | None = None
+    declaration_kind: str | None = None
+    item_type: str | None = None
+    period: str | None = None
+    employer: str | None = None
+    sector: str | None = None
+    recipient: str | None = None
+    benefactor: str | None = None
+    observations: str | None = None
 
 
 class FinancialDocument(CongressRecord):
@@ -250,6 +298,12 @@ class FinancialDocument(CongressRecord):
     deputy_id: str | None = None
     document_kind: str
     url: str
+    full_name: str | None = None
+    legislature: str | None = None
+    parliamentary_group: str | None = None
+    registered_at: Date | None = None
+    declaration_kind: str | None = None
+    extraction_status: str | None = None
 
 
 class Organ(CongressRecord):
@@ -257,6 +311,7 @@ class Organ(CongressRecord):
     name: str
     organ_type: str | None = None
     legislature: str | None = None
+    url: str | None = None
 
 
 class OrganMembership(CongressRecord):
@@ -264,6 +319,10 @@ class OrganMembership(CongressRecord):
     organ_id: str
     deputy_id: str | None = None
     role: str | None = None
+    legislature: str | None = None
+    parliamentary_group: str | None = None
+    started_at: Date | None = None
+    ended_at: Date | None = None
 
 
 class Initiative(CongressRecord):
@@ -272,6 +331,18 @@ class Initiative(CongressRecord):
     file_number: str | None = None
     legislature: str | None = None
     initiative_type: str | None = None
+    grouping: str | None = None
+    super_type: str | None = None
+    presented_at: Date | None = None
+    qualified_at: Date | None = None
+    author: str | None = None
+    procedure_type: str | None = None
+    current_status: str | None = None
+    processing_result: str | None = None
+    competent_committee: str | None = None
+    bocg_links: tuple[str, ...] | list[str] = ()
+    ds_links: tuple[str, ...] | list[str] = ()
+    pdf_links: tuple[str, ...] | list[str] = ()
 
 
 class Intervention(CongressRecord):
@@ -279,6 +350,20 @@ class Intervention(CongressRecord):
     title: str | None = None
     speaker: str | None = None
     legislature: str | None = None
+    document_id: str | None = None
+    initiative_file_number: str | None = None
+    session_date: Date | None = None
+    body: str | None = None
+    phase: str | None = None
+    intervention_type: str | None = None
+    speaker_role: str | None = None
+    starts_at: str | None = None
+    ends_at: str | None = None
+    video_url: str | None = None
+    direct_video_url: str | None = None
+    full_text_url: str | None = None
+    pdf_url: str | None = None
+    page_hint: int | None = None
 
 
 class InterventionOccurrence(CongressRecord):
@@ -286,6 +371,10 @@ class InterventionOccurrence(CongressRecord):
     intervention_id: str
     date: Date | None = None
     organ_id: str | None = None
+    document_id: str | None = None
+    legislature: str | None = None
+    source_export_page: int | None = None
+    source_record_ordinal: int | None = None
 
 
 class VoteEvent(CongressRecord):
@@ -294,6 +383,16 @@ class VoteEvent(CongressRecord):
     legislature: str | None = None
     session: str | None = None
     vote_number: str | None = None
+    vote_date: Date | None = None
+    present: int | None = None
+    yes_votes: int | None = None
+    no_votes: int | None = None
+    abstentions: int | None = None
+    null_votes: int | None = None
+    not_voting: int | None = None
+    source_mode: str | None = None
+    decision_method: str | None = None
+    nominal_data_available: bool | None = None
 
 
 class VoteItem(CongressRecord):
@@ -303,6 +402,8 @@ class VoteItem(CongressRecord):
     yes: int | None = None
     no: int | None = None
     abstentions: int | None = None
+    title: str | None = None
+    file_number: str | None = None
 
 
 class NominalVote(CongressRecord):
@@ -311,6 +412,8 @@ class NominalVote(CongressRecord):
     deputy_id: str | None = None
     deputy_name: str | None = None
     position: str
+    parliamentary_group: str | None = None
+    seat: str | None = None
 
 
 class DocumentAsset(CongressRecord):
@@ -318,6 +421,12 @@ class DocumentAsset(CongressRecord):
     url: str
     mime_type: str | None = None
     document_kind: str | None = None
+    family: str | None = None
+    dataset: str | None = None
+    entity_id: str | None = None
+    title: str | None = None
+    page_hint: int | None = None
+    sha256: str | None = None
 
 
 class DocumentText(CongressRecord):
@@ -328,6 +437,12 @@ class DocumentText(CongressRecord):
     model: str
     confidence: float | None = Field(default=None, ge=0, le=1)
     evidence: tuple[ExtractionEvidence, ...] = ()
+    document_kind: str | None = None
+    source_url: str | None = None
+    mime_type: str | None = None
+    page_count: int | None = Field(default=None, ge=0)
+    extraction_status: str | None = None
+    extraction_error: str | None = None
 
 
 class SpeechBlock(CongressRecord):
@@ -336,6 +451,15 @@ class SpeechBlock(CongressRecord):
     text: str
     speaker: str | None = None
     sequence: int = Field(ge=0)
+    legislature: str | None = None
+    speaker_heading: str | None = None
+    page_hint: int | None = None
+    page_end: int | None = None
+    source_char_start: int | None = None
+    source_char_end: int | None = None
+    parser_version: str | None = None
+    source_kind: str | None = None
+    extraction_method: str | None = None
 
 
 class SalaryEntitlement(CongressRecord):
@@ -343,6 +467,11 @@ class SalaryEntitlement(CongressRecord):
     label: str
     amount_eur: float | None = None
     effective_date: Date | None = None
+    role: str | None = None
+    body: str | None = None
+    periodicity: str | None = None
+    valid_to: Date | None = None
+    source_url: str | None = None
 
 
 NormalizedRecord = (

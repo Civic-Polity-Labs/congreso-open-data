@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from congreso_open_data.storage import (
     BronzeManifest,
     content_matches_format_contract,
     persist_bronze,
+    persist_bronze_stream,
 )
 
 
@@ -42,6 +44,20 @@ def extract_resource(
     client: CongresoHttpClient | None = None,
 ) -> BronzeManifest:
     client = client or CongresoHttpClient()
+    if resource.post_data is None and isinstance(client, CongresoHttpClient):
+        identity = hashlib.sha256(resource.url.encode()).hexdigest()
+        staging = output_root / ".staging" / "downloads" / f"{identity}.part"
+        try:
+            streamed = client.download_to_file(resource.url, staging)
+            return persist_bronze_stream(
+                root=output_root,
+                resource=resource,
+                run_date=run_date,
+                result=streamed,
+                downloaded_path=staging,
+            )
+        finally:
+            staging.unlink(missing_ok=True)
     if resource.post_data is not None:
         result = client.post(
             resource.url,

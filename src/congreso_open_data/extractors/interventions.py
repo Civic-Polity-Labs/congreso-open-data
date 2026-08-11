@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import math
 import re
+from dataclasses import dataclass
+from datetime import date as Date
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -32,6 +35,90 @@ INTERVENTION_LIST_PARAMS = {
 INTERVENTION_EXPORT_PARAMS = INTERVENTION_LIST_PARAMS | {
     "p_p_resource_id": "resourceIDopendataExport",
 }
+
+
+@dataclass(frozen=True)
+class InterventionResourcePlan:
+    """Bounded official export plan for one legislature and filter set."""
+
+    legislature: str
+    official_total: int
+    resources: tuple[DatasetResource, ...]
+
+
+def discover_filtered_intervention_resources(
+    *,
+    legislature: str,
+    client: CongresoHttpClient | None = None,
+    speaker: str | None = None,
+    title: str | None = None,
+    text: str | None = None,
+    initiative_type: str | None = None,
+    date_from: Date | None = None,
+    date_to: Date | None = None,
+    initiative_file_number: str | None = None,
+    phase: str | None = None,
+    body: str | None = None,
+    author: str | None = None,
+    initiative_id: str | None = None,
+    max_results: int = 50_000,
+) -> InterventionResourcePlan:
+    """Discover paginated resources using the Congress' own intervention filters.
+
+    The count request and every export page use the exact same POST body.  This
+    makes the official count independently reconcilable with normalized rows.
+    """
+
+    if max_results < 1:
+        raise ValueError("max_results must be positive")
+    transport = client or CongresoHttpClient()
+    filters = _intervention_list_post_data(
+        legislature=legislature,
+        page=1,
+        speaker=speaker,
+        title=title,
+        text=text,
+        initiative_type=initiative_type,
+        date_from=date_from,
+        date_to=date_to,
+        initiative_file_number=initiative_file_number,
+        phase=phase,
+        body=body,
+        author=author,
+        initiative_id=initiative_id,
+    )
+    list_url = _url_with_query(INTERVENTION_LIST_ENDPOINT, INTERVENTION_LIST_PARAMS)
+    first_page = transport.post(list_url, data=filters)
+    total = _intervention_total(_json_payload(first_page))
+    if total > max_results:
+        raise ValueError(
+            f"Official query contains {total} interventions; configured maximum is "
+            f"{max_results}. Add filters or raise max_results explicitly."
+        )
+    if total == 0:
+        return InterventionResourcePlan(
+            legislature=legislature,
+            official_total=0,
+            resources=(),
+        )
+    canonical_filters = json.dumps(filters, ensure_ascii=False, sort_keys=True)
+    query_token = sha256(canonical_filters.encode()).hexdigest()[:16]
+    pages = math.ceil(total / INTERVENTION_EXPORT_PAGE_SIZE)
+    resources = tuple(
+        _filtered_intervention_export_resource(
+            legislature=legislature,
+            file_index=file_index,
+            total=total,
+            filters=filters,
+            query_token=query_token,
+        )
+        for file_index in range(1, pages + 1)
+    )
+    return InterventionResourcePlan(
+        legislature=legislature,
+        official_total=total,
+        resources=resources,
+    )
 
 
 def discover_intervention_text_resources_from_manifest(
@@ -264,29 +351,85 @@ def _historical_intervention_export_resource(
     )
 
 
+def _filtered_intervention_export_resource(
+    *,
+    legislature: str,
+    file_index: int,
+    total: int,
+    filters: dict[str, str],
+    query_token: str,
+) -> DatasetResource:
+    last_result = min(file_index * INTERVENTION_EXPORT_PAGE_SIZE, total)
+    post_data = dict(filters) | {
+        "_intervenciones_fileIndex": str(file_index),
+        "_intervenciones_fileType": "json",
+        "_intervenciones_lastResult": str(last_result),
+    }
+    return DatasetResource(
+        family="intervenciones",
+        dataset="IntervencionesCronologicamente",
+        format="json",
+        url=_url_with_query(
+            INTERVENTION_LIST_ENDPOINT,
+            INTERVENTION_EXPORT_PARAMS
+            | {
+                "_intervenciones_legislatura": legislature,
+                "_intervenciones_fileIndex": str(file_index),
+                "_intervenciones_fileType": "json",
+            },
+        ),
+        snapshot_token=f"query-{query_token}-Leg{legislature}-{file_index:05d}",
+        legislature=f"Leg.{legislature}",
+        post_data=post_data,
+    )
+
+
 def _historical_intervention_list_post_data(
     *,
     legislature: str,
     page: int,
 ) -> dict[str, str]:
+    return _intervention_list_post_data(legislature=legislature, page=page)
+
+
+def _intervention_list_post_data(
+    *,
+    legislature: str,
+    page: int,
+    speaker: str | None = None,
+    title: str | None = None,
+    text: str | None = None,
+    initiative_type: str | None = None,
+    date_from: Date | None = None,
+    date_to: Date | None = None,
+    initiative_file_number: str | None = None,
+    phase: str | None = None,
+    body: str | None = None,
+    author: str | None = None,
+    initiative_id: str | None = None,
+) -> dict[str, str]:
     return {
         "_intervenciones_legislatura": legislature,
-        "_intervenciones_orador": "",
+        "_intervenciones_orador": speaker or "",
         "_intervenciones_cargo": "",
-        "_intervenciones_titulo": "",
-        "_intervenciones_texto": "",
-        "_intervenciones_tipoIniciativa": "",
-        "_intervenciones_fechaDesde": "",
-        "_intervenciones_fechaHasta": "",
-        "_intervenciones_expedientes": "",
+        "_intervenciones_titulo": title or "",
+        "_intervenciones_texto": text or "",
+        "_intervenciones_tipoIniciativa": initiative_type or "",
+        "_intervenciones_fechaDesde": _official_date(date_from),
+        "_intervenciones_fechaHasta": _official_date(date_to),
+        "_intervenciones_expedientes": initiative_file_number or "",
         "_intervenciones_hasta": "",
-        "_intervenciones_fase": "",
-        "_intervenciones_organo": "",
-        "_intervenciones_autor": "",
+        "_intervenciones_fase": phase or "",
+        "_intervenciones_organo": body or "",
+        "_intervenciones_autor": author or "",
         "_intervenciones_modoListado": "1",
         "_intervenciones_paginaActual": str(page),
-        "_intervenciones_id_iniciativa": "",
+        "_intervenciones_id_iniciativa": initiative_id or "",
     }
+
+
+def _official_date(value: Date | None) -> str:
+    return value.strftime("%d/%m/%Y") if value is not None else ""
 
 
 def _json_payload(result: Any) -> dict[str, Any]:

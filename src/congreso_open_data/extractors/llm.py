@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -66,18 +67,28 @@ def _result(
         if not isinstance(raw, dict) or not raw.get("kind"):
             raise ValueError(f"Invalid provider candidate at index {index}")
         quote = str(raw.get("quote") or "")
-        start = source_text.find(quote) if quote else -1
-        literal = start >= 0
-        item_evidence = ExtractionEvidence(
-            text=quote or None,
-            span_start=start if literal else None,
-            span_end=start + len(quote) if literal else None,
-            confidence=raw.get("confidence"),
-            backend=backend,
-            model=model,
-            version=version,
-            literal=literal,
-            diagnostics={"provider_index": index},
+        spans = (
+            [(match.start(), match.end()) for match in re.finditer(re.escape(quote), source_text)]
+            if quote
+            else []
+        )
+        item_evidence = tuple(
+            ExtractionEvidence(
+                text=quote or None,
+                span_start=start if spans else None,
+                span_end=end if spans else None,
+                confidence=raw.get("confidence"),
+                backend=backend,
+                model=model,
+                version=version,
+                literal=bool(spans),
+                diagnostics={
+                    "provider_index": index,
+                    "quote_occurrences": len(spans),
+                    "occurrence_index": occurrence if spans else None,
+                },
+            )
+            for occurrence, (start, end) in enumerate(spans or [(-1, -1)])
         )
         digest = hashlib.sha256(
             f"{context.source.sha256}:{backend}:{model}:{index}:{raw.get('kind')}".encode()
@@ -87,11 +98,11 @@ def _result(
                 candidate_id=f"{backend}:{digest[:24]}",
                 kind=str(raw["kind"]),
                 value=raw.get("value"),
-                evidence=(item_evidence,),
-                source=context.source,
+                evidence=item_evidence,
+                source=context.source.model_copy(update={"method": backend, "model": model}),
             )
         )
-        evidence.append(item_evidence)
+        evidence.extend(item_evidence)
     return ExtractionResult(
         texts=(source_text,),
         candidates=candidates,

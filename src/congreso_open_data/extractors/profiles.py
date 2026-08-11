@@ -45,19 +45,40 @@ PROFILE_URL = (
 )
 
 
+def deputy_profile_search_rows(
+    *,
+    client: CongresoHttpClient | None = None,
+    legislature_number: int = 15,
+) -> tuple[dict[str, Any], ...]:
+    """Return the bounded official identity index for one legislature."""
+
+    transport = client or CongresoHttpClient()
+    result = transport.post(
+        PROFILE_SEARCH_URL.format(legislature_number=legislature_number),
+        data=_profile_search_payload(legislature_number),
+    )
+    payload = json.loads(result.content.decode("utf-8-sig"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise ValueError("Deputy profile search must contain a data list")
+    rows: list[dict[str, Any]] = []
+    for ordinal, row in enumerate(payload["data"]):
+        if not isinstance(row, dict):
+            raise ValueError(f"Malformed deputy search row at ordinal {ordinal}")
+        rows.append(dict(row))
+    return tuple(rows)
+
+
 def discover_deputy_profile_resources(
     *,
     client: CongresoHttpClient | None = None,
     legislature_number: int = 15,
 ) -> list[DatasetResource]:
-    client = client or CongresoHttpClient()
-    result = client.post(
-        PROFILE_SEARCH_URL.format(legislature_number=legislature_number),
-        data=_profile_search_payload(legislature_number),
+    rows = deputy_profile_search_rows(
+        client=client,
+        legislature_number=legislature_number,
     )
-    payload = json.loads(result.content.decode("utf-8-sig"))
     return deputy_profile_resources_from_payload(
-        payload=payload,
+        payload={"data": list(rows)},
         legislature_number=legislature_number,
     )
 

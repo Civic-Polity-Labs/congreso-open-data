@@ -5,8 +5,10 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from congreso_open_data import CongressClient, ExtractionPlan
-from congreso_open_data.models import ArtifactManifest, CatalogResource
+from congreso_open_data import CatalogResource, CongressClient, ExtractionPlan
+from congreso_open_data import adapters as adapters_module
+from congreso_open_data.adapters import CongressSourceAdapter
+from congreso_open_data.models import ArtifactManifest
 
 
 class FakeAdapter:
@@ -65,3 +67,14 @@ def test_client_injects_adapter_checkpoints_and_normalizes(tmp_path) -> None:
     assert client.last_run.planned == client.last_run.succeeded == 1
     assert Path(client.last_run.checkpoint_path).exists()
     assert (tmp_path / "extraction-runs" / plan.run_date).is_dir()
+
+
+def test_public_catalog_includes_known_organ_and_transparency_pages(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(adapters_module, "discover_catalog", lambda client: [])
+    adapter = CongressSourceAdapter(output_root=tmp_path, transport=object())
+
+    resources = list(adapter.catalog())
+
+    assert any(item.family == "organos" for item in resources)
+    assert any(item.family == "transparencia" for item in resources)
+    assert len({(item.family, item.url, item.format) for item in resources}) == len(resources)

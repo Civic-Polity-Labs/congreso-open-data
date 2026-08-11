@@ -1,7 +1,11 @@
+import hashlib
+
+import pytest
 import requests
 
 from congreso_open_data.http import (
     CongresoHttpClient,
+    ResponseTooLargeError,
     official_diary_pdf_fallback_url,
 )
 
@@ -24,6 +28,11 @@ class _FakeSession:
         self.headers: dict[str, str] = {}
 
     def request(self, *args, **kwargs) -> requests.Response:
+        return self.responses.pop(0)
+
+
+class _DownloadSession(_FakeSession):
+    def get(self, *args, **kwargs) -> requests.Response:
         return self.responses.pop(0)
 
 
@@ -80,6 +89,18 @@ def test_official_diary_fallback_is_narrow() -> None:
         )
         == "https://www.congreso.es/public_oficiales/L2/CONG/DS/CO/CO_303.PDF"
     )
+
+
+def test_http_client_validates_retry_timeout_and_byte_budgets() -> None:
+    with pytest.raises(ValueError, match="max_retries"):
+        CongresoHttpClient(max_retries=0)
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        CongresoHttpClient(timeout_seconds=(0, 1))
+
+    client = CongresoHttpClient(max_retries=1, max_response_bytes=2)
+    client.session = _FakeSession([_response(200, b"three")])
+    with pytest.raises(ResponseTooLargeError, match="configured limit"):
+        client.get("https://www.congreso.es/test")
     assert official_diary_pdf_fallback_url("https://example.test/L2/CONG/DS/CO/CI_303.PDF") is None
     assert (
         official_diary_pdf_fallback_url(
@@ -87,3 +108,65 @@ def test_official_diary_fallback_is_narrow() -> None:
         )
         is None
     )
+
+
+def test_http_post_forwards_form_data_and_uses_bounded_streaming_defaults() -> None:
+    response = _response(200, b"ok")
+
+    class RecordingSession(_FakeSession):
+        def __init__(self) -> None:
+            super().__init__([response])
+            self.call = None
+
+        def request(self, *args, **kwargs):
+            self.call = (args, kwargs)
+            return super().request(*args, **kwargs)
+
+    session = RecordingSession()
+    client = CongresoHttpClient(session=session, max_retries=1)
+
+    result = client.post("https://www.congreso.es/test", data={"speaker": "Ana"})
+
+    assert result.content == b"ok"
+    assert session.call == (
+        ("POST", "https://www.congreso.es/test"),
+        {
+            "data": {"speaker": "Ana"},
+            "timeout": (10.0, 60.0),
+            "stream": True,
+        },
+    )
+    assert session.headers["User-Agent"].startswith("congreso-open-data/1.1")
+
+
+def test_stream_download_is_atomic_hashed_and_preserves_existing_file_on_oversize(
+    tmp_path,
+) -> None:
+    destination = tmp_path / "source.pdf"
+    good = _response(200, b"bounded", **{"Content-Length": "7"})
+    good._content_consumed = True
+    client = CongresoHttpClient(session=_DownloadSession([good]), max_retries=1)
+
+    result = client.download_to_file(
+        "https://www.congreso.es/source.pdf",
+        destination,
+        max_bytes=7,
+    )
+
+    assert destination.read_bytes() == b"bounded"
+    assert result.bytes == 7
+    assert result.sha256 == hashlib.sha256(b"bounded").hexdigest()
+    assert not destination.with_suffix(".pdf.tmp").exists()
+
+    destination.write_bytes(b"previous")
+    oversized = _response(200, b"too-large", **{"Content-Length": "9"})
+    oversized._content_consumed = True
+    client = CongresoHttpClient(session=_DownloadSession([oversized]), max_retries=1)
+    with pytest.raises(ResponseTooLargeError, match="Content-Length"):
+        client.download_to_file(
+            "https://www.congreso.es/source.pdf",
+            destination,
+            max_bytes=8,
+        )
+    assert destination.read_bytes() == b"previous"
+    assert not destination.with_suffix(".pdf.tmp").exists()

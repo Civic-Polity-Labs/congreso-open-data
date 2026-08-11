@@ -8,7 +8,6 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from inspect import signature
 from io import BytesIO
 from pathlib import Path
 from threading import Lock
@@ -20,12 +19,18 @@ from congreso_open_data.extractors.patrimony_nlp import (
     is_patrimony_boilerplate,
 )
 from congreso_open_data.normalization import stable_id
+from congreso_open_data.rapidocr_compat import (
+    create_rapidocr_engine,
+    rapidocr_lines,
+    rapidocr_runtime_kwargs,
+)
 from congreso_open_data.runtime import (
     desired_ocr_onnx_providers,
-    min_confidence_for_model,
-    model_name_from_graph,
+    model_name_from_contract,
     ocr_runtime_config,
     require_model_contract,
+    review_threshold_for_model,
+    selected_ocr_onnx_providers,
 )
 
 _RAPID_OCR_ENGINE: Any | None = None
@@ -153,7 +158,7 @@ def pdf_document_text_row_from_pages(
     }
 
 
-def pdf_document_silver_rows(
+def pdf_document_normalized_rows(
     content: bytes,
     *,
     source_url: str,
@@ -177,17 +182,17 @@ def pdf_document_silver_rows(
         document_kind=text_row["document_kind"],
     )
     return {
-        "silver_document_texts": [_public_text_row(text_row)],
-        "silver_deputy_document_pages": page_rows,
-        "silver_deputy_document_tables": _table_rows(page_rows),
-        "silver_deputy_document_entities": _entity_rows(
+        "document_texts": [_public_text_row(text_row)],
+        "document_pages": page_rows,
+        "document_tables": _table_rows(page_rows),
+        "document_entities": _entity_rows(
             pages=page_rows,
             source_url=source_url,
             source_sha256=source_sha256,
             snapshot_date=snapshot_date,
             document_kind=text_row["document_kind"],
         ),
-        "silver_deputy_document_extractions": extraction_rows,
+        "document_extractions": extraction_rows,
     }
 
 
@@ -336,7 +341,7 @@ def _extract_pdf_page_texts_with_diagnostics(
         errors.append(f"pypdf={type(exc).__name__}: {exc}")
 
     try:
-        import fitz
+        import pymupdf as fitz
 
         display_errors = bool(fitz.TOOLS.mupdf_display_errors())
         fitz.TOOLS.reset_mupdf_warnings()
@@ -1009,7 +1014,7 @@ def _is_pdf_stamp_line(line: str) -> bool:
 
 def _ocr_pdf_page_texts(content: bytes) -> PdfTextExtraction:
     try:
-        import fitz
+        import pymupdf as fitz
     except ImportError as exc:
         return PdfTextExtraction(
             page_texts=[],
@@ -1045,7 +1050,7 @@ def _ocr_pdf_page_texts(content: bytes) -> PdfTextExtraction:
             image_paths.append(image_path)
         valid_images = [path for path in image_paths if path.name]
         workers = min(_ocr_worker_count(), len(valid_images)) if valid_images else 1
-        _rapidocr_engine()
+        rapidocr_engine()
         with ThreadPoolExecutor(max_workers=workers) as pool:
             results = list(pool.map(_rapidocr_image_text, valid_images))
         result_by_path = dict(zip(valid_images, results, strict=True))
@@ -1070,14 +1075,16 @@ def _ocr_worker_count() -> int:
 
 
 def _rapidocr_image_text(image_path: Path) -> tuple[str, float]:
-    return _rapidocr_image_text_with_engine(image_path, _rapidocr_engine())
+    return rapidocr_image_text_with_engine(image_path, rapidocr_engine())
 
 
-def _rapidocr_image_text_with_engine(image_path: Path, engine: Any) -> tuple[str, float]:
+def rapidocr_image_text_with_engine(image_path: Path, engine: Any) -> tuple[str, float]:
+    """Extract ordered text from one image using an injected RapidOCR engine."""
+
     lines: list[Any] = []
     use_angle_classifier = bool(ocr_runtime_config().get("use_angle_classifier", False))
     for image_input in _ocr_image_inputs(image_path):
-        result, _ = engine(image_input, use_cls=use_angle_classifier)
+        result = rapidocr_lines(engine(image_input, use_cls=use_angle_classifier))
         if result:
             lines.extend(_ocr_lines_in_reading_order(result))
     text = "\n".join(str(item[1]).strip() for item in lines if str(item[1]).strip())
@@ -1273,39 +1280,32 @@ def _ocr_line_sort_key(item: Any) -> tuple[float, float]:
     return _box_top(item[0]), _box_left(item[0])
 
 
-def _rapidocr_engine() -> Any:
+def rapidocr_engine() -> Any:
+    """Return the process-local RapidOCR engine configured by package contracts."""
+
     global _RAPID_OCR_ENGINE
     if _RAPID_OCR_ENGINE is None:
         with _RAPID_OCR_ENGINE_LOCK:
             if _RAPID_OCR_ENGINE is None:
                 require_model_contract("document_ocr")
-                from rapidocr_onnxruntime import RapidOCR
-
-                _RAPID_OCR_ENGINE = RapidOCR(**_rapidocr_runtime_kwargs(RapidOCR))
+                _RAPID_OCR_ENGINE = create_rapidocr_engine(
+                    providers=tuple(selected_ocr_onnx_providers())
+                )
     return _RAPID_OCR_ENGINE
 
 
 def _rapidocr_runtime_kwargs(rapidocr_cls: Any) -> dict[str, Any]:
-    providers = desired_ocr_onnx_providers()
-    kwargs: dict[str, Any] = {}
-    try:
-        parameters = signature(rapidocr_cls).parameters
-    except (TypeError, ValueError):
-        parameters = {}
-    if "providers" in parameters:
-        kwargs["providers"] = providers
-    if "use_cuda" in parameters:
-        kwargs["use_cuda"] = "CUDAExecutionProvider" in providers
-    if "use_gpu" in parameters:
-        kwargs["use_gpu"] = "CUDAExecutionProvider" in providers
-    return kwargs
+    return rapidocr_runtime_kwargs(
+        rapidocr_cls,
+        providers=tuple(desired_ocr_onnx_providers()),
+    )
 
 
 def _page_model_name(extraction_method: str) -> str | None:
     if extraction_method == "rapidocr_onnxruntime":
         return ocr_runtime_config()["pipeline_version"]
     if extraction_method == "pypdf_text":
-        return model_name_from_graph("pdf_text_layer", "pypdf")
+        return model_name_from_contract("pdf_text_layer", "pypdf")
     if extraction_method == "pymupdf_text":
         return "pymupdf"
     return None
@@ -1410,7 +1410,7 @@ def _table_rows(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "row_count": len(lines),
                     "column_count": _rough_column_count(lines),
                     "extraction_method": "text_layout_heuristic",
-                    "model_name": model_name_from_graph(
+                    "model_name": model_name_from_contract(
                         "deputy_document_table_detector",
                         "text_layout_heuristic",
                     ),
@@ -1564,7 +1564,7 @@ def _entity_row(
         "end_char": end_char,
         "bbox": None,
         "extraction_method": "regex",
-        "model_name": model_name_from_graph("deputy_document_entity_regex", "regex"),
+        "model_name": model_name_from_contract("deputy_document_entity_regex", "regex"),
         "confidence": 0.95,
         "needs_review": False,
         "raw_evidence": raw_evidence,
@@ -1643,9 +1643,10 @@ def _extraction_rows(
                     "text_span": clean,
                     "bbox": None,
                     "extraction_method": "rules_v1",
-                    "model_name": model_name_from_graph("deputy_document_rules", "rules_v1"),
+                    "model_name": model_name_from_contract("deputy_document_rules", "rules_v1"),
                     "confidence": confidence,
-                    "needs_review": confidence < min_confidence_for_model("deputy_document_rules"),
+                    "needs_review": confidence
+                    < review_threshold_for_model("deputy_document_rules"),
                     "raw_evidence": clean,
                     "source_file_sha256": source_sha256,
                     "snapshot_date": snapshot_date,
@@ -2045,7 +2046,7 @@ def _structured_extraction_row(
     needs_review: bool | None = None,
 ) -> dict[str, Any]:
     review = (
-        confidence < min_confidence_for_model("deputy_document_rules")
+        confidence < review_threshold_for_model("deputy_document_rules")
         if needs_review is None
         else needs_review
     )
@@ -2079,7 +2080,7 @@ def _structured_extraction_row(
         "text_span": description,
         "bbox": None,
         "extraction_method": "rules_v1",
-        "model_name": model_name_from_graph("deputy_document_rules", "rules_v1"),
+        "model_name": model_name_from_contract("deputy_document_rules", "rules_v1"),
         "confidence": confidence,
         "needs_review": review,
         "raw_evidence": raw_evidence,

@@ -1,0 +1,31 @@
+version = 1
+name = "congreso-open-data-extraction-contracts"
+
+[models.pdf_text_layer]
+implementation = "pypdf"
+purpose = "Extract embedded PDF text before an explicitly selected OCR backend."
+requires_gpu = false
+
+[models.document_ocr]
+implementation = "rapidocr"
+pipeline_version = "rapidocr_3_9_onnxruntime_layout_v5_mixed_skew_rule_upright"
+use_angle_classifier = false
+purpose = "Recover text from scanned official documents."
+requires_gpu = true
+onnx_providers = ["CUDAExecutionProvider"]
+
+[models.deputy_document_table_detector]
+implementation = "text_layout_heuristic"
+purpose = "Preserve tabular evidence from declaration pages."
+requires_gpu = false
+
+[models.deputy_document_entity_regex]
+implementation = "regex_entities_v1"
+purpose = "Extract literal amounts, dates, percentages and document entities."
+requires_gpu = false
+
+[models.deputy_document_rules]
+implementation = "rules_v1"
+purpose = "Produce reviewable patrimonial, income, liability and interest candidates."
+requires_gpu = false
+review_below_confidence = 0.7

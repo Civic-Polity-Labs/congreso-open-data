@@ -47,6 +47,8 @@ class ExtractorRegistry:
         builtin: bool = False,
     ) -> None:
         key = self._key(name)
+        if not callable(factory):
+            raise TypeError("Extractor factory must be callable")
         with self._lock:
             if key in self._factories or key in self._instances:
                 raise ValueError(f"Extractor backend already registered: {key}")
@@ -56,6 +58,8 @@ class ExtractorRegistry:
 
     def register_instance(self, name: str, backend: ExtractorBackend) -> None:
         key = self._key(name)
+        if not isinstance(backend, ExtractorBackend):
+            raise TypeError("Extractor backend does not implement ExtractorBackend")
         with self._lock:
             if key in BUILTIN_EXTRACTORS:
                 raise ValueError(f"Extractor name is reserved by the package: {key}")
@@ -69,16 +73,23 @@ class ExtractorRegistry:
             instance = self._instances.get(key)
             factory = self._factories.get(key)
         if instance is not None:
-            return instance
-        if factory is None:
+            backend = instance
+        elif factory is None:
             raise LookupError(
                 f"Unknown extractor backend {key!r}. Install its optional extra, "
                 "register an instance, or install a congreso_open_data.extractors plugin."
             )
-        backend = factory(spec)
+        else:
+            backend = factory(spec)
+        if not isinstance(backend, ExtractorBackend):
+            raise TypeError(f"Extractor factory {key!r} did not return ExtractorBackend")
         if backend.engine != spec.engine:
             raise ValueError(
                 f"Backend {key!r} belongs to engine {backend.engine!r}, not {spec.engine!r}"
+            )
+        if backend.model != spec.model:
+            raise ValueError(
+                f"Backend {key!r} identifies model {backend.model!r}, not {spec.model!r}"
             )
         return backend
 
@@ -96,10 +107,7 @@ class ExtractorRegistry:
             def factory(
                 spec: ExtractionSpec, loaded_object: Any = factory_or_type
             ) -> ExtractorBackend:
-                try:
-                    return cast(ExtractorBackend, loaded_object(spec))
-                except TypeError:
-                    return cast(ExtractorBackend, loaded_object())
+                return cast(ExtractorBackend, loaded_object(spec))
 
             self.register_factory(key, factory)
             loaded.append(key)

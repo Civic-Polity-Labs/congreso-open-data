@@ -7,35 +7,50 @@ from collections.abc import Iterable, Iterator
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
+from congreso_open_data.documents import pdf_document_text_row
+from congreso_open_data.extractors.initiatives import initiative_empty_scope_is_expected
 from congreso_open_data.html import parse_visible_html
+from congreso_open_data.interventions import speech_block_rows as intervention_speech_block_rows
 from congreso_open_data.models import (
     ArtifactManifest,
     Deputy,
     DeputyProfile,
     DocumentAsset,
+    DocumentText,
+    ExtractionEvidence,
+    FinancialDocument,
     Initiative,
     InterestDeclaration,
     Intervention,
+    InterventionOccurrence,
     NominalVote,
     Organ,
     OrganMembership,
+    SalaryEntitlement,
     SourceRef,
+    SpeechBlock,
     VoteEvent,
     VoteItem,
 )
-from congreso_open_data.normalization import load_records, stable_id
+from congreso_open_data.normalization import iter_records, load_records, stable_id
+from congreso_open_data.protocols import ensure_bounded_file
 from congreso_open_data.storage import BronzeManifest
 from congreso_open_data.transforms import (
+    approved_law_rows_from_payload,
+    deputy_financial_document_rows_from_profile,
     deputy_profile_row,
     deputy_row,
     document_asset_rows_from_links,
     document_asset_rows_from_records,
+    historical_initiative_rows_from_list_payload,
     initiative_row,
     interest_row,
     intervention_row,
     organ_membership_rows,
     organ_rows_from_links,
+    salary_rows_from_text,
     vote_rows,
 )
 
@@ -53,7 +68,9 @@ def public_manifest(manifest: BronzeManifest) -> ArtifactManifest:
         sha256=manifest.sha256,
         bytes=manifest.bytes,
         payload_path=manifest.bronze_path,
+        request_method=manifest.request_method,
         request_parameters=manifest.request_parameters_json,
+        request_parameters_sha256=manifest.request_parameters_sha256,
         content_type=manifest.content_type,
         http_status=manifest.status_code,
         legislature=manifest.legislature,
@@ -80,6 +97,7 @@ def legacy_manifest(manifest: ArtifactManifest) -> BronzeManifest:
         session=manifest.session,
         vote_number=manifest.vote_number,
         content_type=manifest.content_type,
+        request_method=manifest.request_method,
         request_parameters_json=(
             manifest.request_parameters
             if isinstance(manifest.request_parameters, str)
@@ -87,20 +105,90 @@ def legacy_manifest(manifest: ArtifactManifest) -> BronzeManifest:
             if manifest.request_parameters
             else None
         ),
+        request_parameters_sha256=manifest.request_parameters_sha256,
     )
 
 
-def _content(manifest: ArtifactManifest, root: Path) -> bytes:
+def _artifact_path(manifest: ArtifactManifest, root: Path) -> Path:
     path = Path(manifest.payload_path)
     if not path.is_absolute():
         path = root / path
     if not path.is_file():
         raise FileNotFoundError(f"Bronze artifact not found: {path}")
-    return path.read_bytes()
+    return path
 
 
-def _records(manifest: ArtifactManifest, root: Path) -> list[dict[str, Any]]:
-    return load_records(_content(manifest, root), manifest.format)
+def _content(
+    manifest: ArtifactManifest,
+    root: Path,
+    *,
+    max_bytes: int = 256 * 1024 * 1024,
+) -> bytes:
+    return ensure_bounded_file(_artifact_path(manifest, root), max_bytes=max_bytes)
+
+
+def _records(manifest: ArtifactManifest, root: Path) -> Iterable[dict[str, Any]]:
+    if manifest.family in {"iniciativas", "initiative_recovery"}:
+        return records_for_manifest_content(
+            _content(manifest, root, max_bytes=64 * 1024 * 1024),
+            manifest=manifest,
+        )
+    return iter_records(_artifact_path(manifest, root), manifest.format)
+
+
+def records_for_manifest_content(
+    content: bytes,
+    *,
+    manifest: ArtifactManifest,
+) -> list[dict[str, Any]]:
+    """Decode one bounded tabular artifact using its dataset-specific contract."""
+
+    if manifest.family == "initiative_recovery" and manifest.format == "json":
+        payload = json.loads(content.decode("utf-8-sig"))
+        if (
+            isinstance(payload, dict)
+            and payload.get("provenance_kind") == "verified_multi_source_derivative"
+        ):
+            record = payload.get("record")
+            lineage = payload.get("field_lineage")
+            if not isinstance(record, dict) or not isinstance(lineage, dict) or not lineage:
+                raise ValueError("Verified initiative recovery derivative is incomplete")
+            return [record]
+        if isinstance(payload, dict) and "lista_iniciativas" in payload:
+            return historical_initiative_rows_from_list_payload(
+                payload,
+                source_dataset="GeneralInitiatives",
+            )
+        raise ValueError("Unsupported initiative recovery payload")
+    if manifest.family == "iniciativas" and manifest.format == "json":
+        payload = json.loads(content.decode("utf-8-sig"))
+        if payload == {}:
+            if initiative_empty_scope_is_expected(manifest.dataset, manifest.legislature):
+                return []
+            raise ValueError("Unexpected empty historical initiative payload")
+        if isinstance(payload, dict) and "lista_iniciativas" in payload:
+            return historical_initiative_rows_from_list_payload(
+                payload,
+                source_dataset=manifest.dataset,
+            )
+        if (
+            isinstance(payload, dict)
+            and "data" in payload
+            and manifest.dataset == "IniciativasLegislativasAprobadas"
+        ):
+            return approved_law_rows_from_payload(
+                payload,
+                default_year=_source_query_param(
+                    manifest.source_url,
+                    "_iniciativasLegislativasAprobadas_anyoSelec",
+                ),
+            )
+    return load_records(content, manifest.format)
+
+
+def _source_query_param(url: str, key: str) -> str | None:
+    values = parse_qs(urlparse(url).query).get(key)
+    return values[0] if values else None
 
 
 def _source(manifest: ArtifactManifest, *, method: str = "deterministic") -> SourceRef:
@@ -173,6 +261,35 @@ def profiles(manifests: Iterable[ArtifactManifest], *, root: Path) -> Iterator[D
         )
 
 
+def financial_documents(
+    manifests: Iterable[ArtifactManifest], *, root: Path
+) -> Iterator[FinancialDocument]:
+    for manifest in manifests:
+        if manifest.family != "diputados" or manifest.dataset != "DeputyProfile":
+            continue
+        parsed = parse_visible_html(_content(manifest, root), base_url=manifest.source_url)
+        profile = deputy_profile_row(
+            visible_text=parsed.visible_text,
+            source_url=manifest.source_url,
+            source_sha256=manifest.sha256,
+            snapshot_date=manifest.run_date,
+        )
+        for row in deputy_financial_document_rows_from_profile(
+            links=parsed.links,
+            profile=profile,
+            snapshot_date=manifest.run_date,
+        ):
+            yield FinancialDocument.model_validate(
+                {
+                    **row,
+                    "document_id": row["financial_document_id"],
+                    "deputy_id": row.get("person_id"),
+                    "url": row["source_url"],
+                    "source": _source(manifest, method="official_html"),
+                }
+            )
+
+
 def initiatives(manifests: Iterable[ArtifactManifest], *, root: Path) -> Iterator[Initiative]:
     for manifest in manifests:
         if manifest.family not in {"iniciativas", "initiative_recovery"}:
@@ -215,6 +332,29 @@ def interventions(manifests: Iterable[ArtifactManifest], *, root: Path) -> Itera
             )
 
 
+def intervention_occurrences(
+    manifests: Iterable[ArtifactManifest], *, root: Path
+) -> Iterator[InterventionOccurrence]:
+    for manifest in manifests:
+        if manifest.family != "intervenciones" or manifest.format not in {"json", "csv"}:
+            continue
+        for ordinal, raw in enumerate(_records(manifest, root)):
+            row = intervention_row(
+                raw,
+                source_sha256=manifest.sha256,
+                snapshot_date=manifest.run_date,
+                source_record_ordinal=ordinal,
+            )
+            yield InterventionOccurrence.model_validate(
+                {
+                    **row,
+                    "occurrence_id": stable_id(manifest.sha256, ordinal),
+                    "date": row.get("session_date"),
+                    "source": _source(manifest),
+                }
+            )
+
+
 def votes(
     manifests: Iterable[ArtifactManifest], *, root: Path
 ) -> Iterator[VoteEvent | VoteItem | NominalVote]:
@@ -234,7 +374,14 @@ def votes(
             {
                 **event,
                 "vote_id": event["vote_event_id"],
-                "session": event.get("session_number"),
+                "session": (
+                    str(event["session_number"])
+                    if event.get("session_number") is not None
+                    else None
+                ),
+                "vote_number": (
+                    str(event["vote_number"]) if event.get("vote_number") is not None else None
+                ),
                 "source": source,
             }
         )
@@ -303,6 +450,126 @@ def documents(manifests: Iterable[ArtifactManifest], *, root: Path) -> Iterator[
             )
         for row in rows:
             yield DocumentAsset.model_validate({**row, "source": source})
+
+
+def document_texts(
+    manifests: Iterable[ArtifactManifest],
+    *,
+    root: Path,
+    use_ocr: bool = False,
+) -> Iterator[DocumentText]:
+    for manifest in manifests:
+        if manifest.format != "pdf" or manifest.family not in {
+            "documents",
+            "intervention_documents",
+        }:
+            continue
+        row = pdf_document_text_row(
+            _content(manifest, root),
+            source_url=manifest.source_url,
+            source_sha256=manifest.sha256,
+            snapshot_date=manifest.run_date,
+            use_ocr=use_ocr,
+        )
+        page_texts = row.get("page_texts") or []
+        page_methods = row.get("_page_methods") or row.get("page_methods") or []
+        page_confidences = row.get("_page_confidences") or row.get("page_confidences") or []
+        evidence = tuple(
+            ExtractionEvidence(
+                text=str(text),
+                page=index,
+                confidence=(
+                    float(page_confidences[index - 1])
+                    if index <= len(page_confidences) and page_confidences[index - 1] is not None
+                    else None
+                ),
+                backend=(
+                    str(page_methods[index - 1])
+                    if index <= len(page_methods)
+                    else str(row["extraction_method"])
+                ),
+                model=str(row["model_name"]),
+                version="1.0.0",
+            )
+            for index, text in enumerate(page_texts, start=1)
+        )
+        yield DocumentText.model_validate(
+            {
+                **row,
+                "document_id": row["document_sha256"],
+                "model": row["model_name"],
+                "confidence": (
+                    sum(item.confidence for item in evidence if item.confidence is not None)
+                    / sum(item.confidence is not None for item in evidence)
+                    if any(item.confidence is not None for item in evidence)
+                    else None
+                ),
+                "evidence": evidence,
+                "source": _source(
+                    manifest,
+                    method=str(row["extraction_method"]),
+                ),
+            }
+        )
+
+
+def speech_blocks(manifests: Iterable[ArtifactManifest], *, root: Path) -> Iterator[SpeechBlock]:
+    for manifest in manifests:
+        if (
+            manifest.family != "intervention_documents"
+            or manifest.dataset != "InterventionFullText"
+            or manifest.format != "html"
+        ):
+            continue
+        parsed = parse_visible_html(_content(manifest, root), base_url=manifest.source_url)
+        if parsed.content_selector != ".textoIntegro" or not parsed.visible_text.strip():
+            raise ValueError(
+                "Official intervention HTML is missing its unique .textoIntegro transcript"
+            )
+        for row in intervention_speech_block_rows(
+            visible_text=parsed.visible_text,
+            source_url=manifest.source_url,
+            source_sha256=manifest.sha256,
+            snapshot_date=manifest.run_date,
+            legislature=manifest.legislature,
+            source_kind="html",
+            extraction_method="official_html_transcript",
+        ):
+            yield SpeechBlock.model_validate(
+                {
+                    **row,
+                    "speaker": row.get("normalized_speaker"),
+                    "sequence": row["ordinal"],
+                    "source": _source(manifest, method="official_html_transcript"),
+                }
+            )
+
+
+def salary_entitlements(
+    manifests: Iterable[ArtifactManifest], *, root: Path
+) -> Iterator[SalaryEntitlement]:
+    for manifest in manifests:
+        if (
+            manifest.family != "transparencia"
+            or manifest.dataset != "RetribucionesCargosMesa"
+            or manifest.format != "html"
+        ):
+            continue
+        parsed = parse_visible_html(_content(manifest, root), base_url=manifest.source_url)
+        for row in salary_rows_from_text(
+            parsed.visible_text,
+            source_url=manifest.source_url,
+            snapshot_date=manifest.run_date,
+        ):
+            yield SalaryEntitlement.model_validate(
+                {
+                    **row,
+                    "entitlement_id": row["salary_entitlement_id"],
+                    "label": row["concept"],
+                    "effective_date": row.get("valid_from"),
+                    "source": _source(manifest, method="official_html"),
+                }
+            )
 
 
 def discover_document_assets(
